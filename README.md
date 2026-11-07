@@ -29,6 +29,10 @@ To start it at login: System Settings → General → Login Items → add `build
 - **Tasks & reminders** — “remind me to stretch in 30 minutes”, “add call mom tomorrow at 6pm”, “I finished task 1”, “what's on my list?”. Pi pops a bubble + sound when one is due.
 - **Chat** — ask anything; replies stream from your local model.
 - **Daily check-ins** — morning plan (after 9:00) and evening recap (after 18:00), once per day. Toggle in the 🥧 menu bar item.
+- **Pocket** — drag a screenshot (or any image) onto Pi and it goes into Pi's pocket, a little photo stack next to the pie.
+  Hover the stack to open it, then **drag an image out** into any app or folder, **click** to copy it, **double-click** to open it,
+  or right-click for Show in Finder / Remove. Pi holds the 6 most recent images (older ones go to the Trash). Right-click Pi →
+  “Put copied image in my pocket” takes the image on your clipboard. Files live in `~/Library/Application Support/PiePet/Pocket`.
 - **Clipboard** — Summarize / Fix writing / Explain / Draft reply on whatever you copied.
 - Pi naps after 10 idle minutes. The model is kept loaded for only 3 minutes after each request so your Mac stays cool.
 

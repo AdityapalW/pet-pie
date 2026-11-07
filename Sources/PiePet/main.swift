@@ -163,6 +163,7 @@ struct PetContainer: View {
     var onDragStart: () -> Void
     var onDrag: () -> Void
     var onType: () -> Void = {}
+    var onPocketPaste: () -> Void = {}
 
     @State private var dragging = false
     @State private var moved = false
@@ -175,6 +176,16 @@ struct PetContainer: View {
         VStack(spacing: 0) {
             PetView(state: pet)
                 .frame(width: PetLayout.pet.width, height: PetLayout.pet.height)
+                .background(
+                    // Warm glow while an image hovers over Pi.
+                    Ellipse()
+                        .fill(RadialGradient(colors: [PetDrawing.gold.opacity(0.75), PetDrawing.gold.opacity(0)],
+                                             center: .center, startRadius: 4, endRadius: 62))
+                        .frame(width: 124, height: 118)
+                        .opacity(pet.dropTargeted ? 1 : 0)
+                        .scaleEffect(pet.dropTargeted ? 1 : 0.7)
+                        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: pet.dropTargeted)
+                )
                 .contentShape(Rectangle())
                 .gesture(
                     DragGesture(minimumDistance: 0, coordinateSpace: .global)
@@ -196,6 +207,7 @@ struct PetContainer: View {
                         ForEach(ClipAction.allCases, id: \.self) { a in Button(a.label) { assistant.clipboard(a) } }
                     }
                     Button(snow.isOn ? "Stop the snow" : "Let it snow ❄️") { snow.toggle() }
+                    Button("Put copied image in my pocket") { onPocketPaste() }
                     Divider()
                     Button(pet.mood == .sleeping ? "Wake up" : "Nap") {
                         if pet.mood == .sleeping { pet.touch() } else { pet.hideBubble(); pet.mood = .sleeping }
@@ -203,7 +215,20 @@ struct PetContainer: View {
                     Button("Quit Pi") { NSApp.terminate(nil) }
                 }
             ZStack(alignment: .top) {
-                if showPill {
+                if pet.dropTargeted {
+                    HStack(spacing: 6) {
+                        Image(systemName: "tray.and.arrow.down.fill").font(.system(size: 13, weight: .semibold))
+                        Text("Drop to keep").font(.system(size: 12, weight: .semibold, design: .rounded))
+                    }
+                    .foregroundColor(Theme.brown)
+                    .padding(.horizontal, 12)
+                    .frame(height: 30)
+                    .background(Capsule().fill(Theme.cream))
+                    .overlay(Capsule().strokeBorder(Theme.brown, lineWidth: 1.4))
+                    .shadow(color: .black.opacity(0.22), radius: 3, y: 1.5)
+                    .padding(.top, 4)
+                    .transition(.scale(scale: 0.5, anchor: .top).combined(with: .opacity))
+                } else if showPill {
                     ActionPill(assistant: assistant, voice: assistant.voice, snow: snow, onType: onType)
                         .transition(.scale(scale: 0.4, anchor: .top).combined(with: .opacity))
                 } else {
@@ -222,6 +247,7 @@ struct PetContainer: View {
                 }
             }
             .animation(.spring(response: 0.28, dampingFraction: 0.8), value: showPill)
+            .animation(.spring(response: 0.28, dampingFraction: 0.8), value: pet.dropTargeted)
         }
         .frame(width: PetLayout.window.width, height: PetLayout.window.height, alignment: .top)
     }
@@ -233,10 +259,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let store = TaskStore()
     let notes = NotesStore()
     let snow = SnowController()
+    let pocket = PocketStore()
     lazy var assistant = Assistant(pet: pet, store: store, notes: notes)
     var bridge: BridgeServer?
 
     var petPanel: NSPanel!
+    var pocketPanel: NSPanel!
     var bubblePanel: NSPanel!
     var quickPanel: KeyPanel!
     var dashboard: NSWindow!
@@ -248,6 +276,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         makePetPanel()
+        makePocketPanel()
         makeBubblePanel()
         makeQuickPanel()
         makeDashboard()
@@ -320,9 +349,84 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             onClick: { [weak self] in self?.petClicked() },
             onDragStart: { [weak self] in self?.dragStart() },
             onDrag: { [weak self] in self?.dragMove() },
-            onType: { [weak self] in self?.toggleQuickAsk() })
-        petPanel.contentView = NSHostingView(rootView: view)
+            onType: { [weak self] in self?.toggleQuickAsk() },
+            onPocketPaste: { [weak self] in self?.pocketPaste() })
+        let host = DropHostingView(rootView: view)
+        host.onTargetChange = { [weak self] on in self?.setDropTarget(on) }
+        host.onDrop = { [weak self] pb in self?.takeDrop(pb) ?? false }
+        petPanel.contentView = host
         petPanel.orderFrontRegardless()
+    }
+
+    // MARK: Pocket
+
+    private func makePocketPanel() {
+        pocketPanel = floatingPanel(NSRect(origin: .zero, size: PocketView.collapsed))
+        let host = DropHostingView(rootView: PocketView(pocket: pocket))
+        host.onTargetChange = { [weak self] on in self?.setDropTarget(on) }
+        host.onDrop = { [weak self] pb in self?.takeDrop(pb) ?? false }
+        pocketPanel.contentView = host
+        pocket.announce = { [weak self] text in self?.pet.say(text, mood: .excited, seconds: 2.5) }
+        pocket.$items
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.layoutPocket() }
+            .store(in: &cancellables)
+        layoutPocket()
+    }
+
+    /// Keeps the pocket tucked against Pi's pie (left side, or right near the screen's left edge).
+    private func layoutPocket() {
+        guard let pocketPanel else { return }
+        guard petPanel.isVisible, !pocket.items.isEmpty else {
+            pocket.expanded = false
+            pocketPanel.orderOut(nil)
+            return
+        }
+        let f = petPanel.frame
+        let petRect = NSRect(x: f.midX - PetLayout.pet.width / 2, y: f.maxY - PetLayout.pet.height,
+                             width: PetLayout.pet.width, height: PetLayout.pet.height)
+        let size = PocketView.size(for: pocket)
+        let widest = PocketView.expandedSize(count: pocket.items.count).width
+        let vis = petPanel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? f
+        let onLeft = petRect.minX + 10 - widest >= vis.minX
+        if pocket.onLeft != onLeft { pocket.onLeft = onLeft }
+        var x = onLeft ? petRect.minX + 10 - size.width : petRect.maxX - 10
+        var y = petRect.minY - 2
+        x = min(max(x, vis.minX), vis.maxX - size.width)
+        y = min(max(y, vis.minY), vis.maxY - size.height)
+        pocketPanel.setFrame(NSRect(x: x, y: y, width: size.width, height: size.height), display: true)
+        if !pocketPanel.isVisible { pocketPanel.orderFrontRegardless() }
+    }
+
+    private func setDropTarget(_ on: Bool) {
+        guard pet.dropTargeted != on else { return }
+        pet.dropTargeted = on
+        if on {
+            pet.touch()
+            if pet.mood == .idle { pet.mood = .excited }
+        } else if pet.mood == .excited && pet.bubble == nil {
+            pet.mood = .idle
+        }
+    }
+
+    private func takeDrop(_ pb: NSPasteboard) -> Bool {
+        pocket.take(from: pb) { [weak self] n in
+            guard let self else { return }
+            if n > 0 {
+                pet.say(n == 1 ? "Got it! It's in my pocket. Drag it out whenever you need it."
+                               : "Got \(n)! They're in my pocket.", mood: .excited, seconds: 4)
+            } else {
+                pet.say("Hmm, I couldn't hold on to that one.", seconds: 3)
+            }
+        }
+    }
+
+    func pocketPaste() {
+        guard PocketStore.canAccept(.general) else {
+            pet.say("There's no image on your clipboard right now.", seconds: 3)
+            return
+        }
+        _ = takeDrop(.general)
     }
 
     private func makeBubblePanel() {
@@ -349,6 +453,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Show right away; hide after a short delay so it doesn't flicker.
         let show = inside || Date().timeIntervalSince(lastInside) < 0.7
         if pet.hovering != show { pet.hovering = show }
+        updatePocketHover()
+    }
+
+    private var lastInPocket = Date.distantPast
+
+    /// Opens the pocket into a tray while the mouse is over it; stays open during a drag out.
+    private func updatePocketHover() {
+        guard pocketPanel.isVisible else { return }
+        let over = pocketPanel.frame.insetBy(dx: -4, dy: -4).contains(NSEvent.mouseLocation)
+        if over { lastInPocket = Date() }
+        let holding = NSEvent.pressedMouseButtons != 0
+        let want = over || (pocket.expanded && (holding || Date().timeIntervalSince(lastInPocket) < 0.5))
+        if want != pocket.expanded {
+            pocket.expanded = want
+            layoutPocket()
+        }
     }
 
     // MARK: Quick ask
@@ -459,6 +579,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                         y: dragStartOrigin.y + m.y - dragStartMouse.y))
         if bubblePanel.isVisible { positionBubble() }
         if quickPanel.isVisible { quickPanel.orderOut(nil) }
+        layoutPocket()
         UserDefaults.standard.set(NSStringFromPoint(petPanel.frame.origin), forKey: "petOrigin")
     }
 
@@ -491,7 +612,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func togglePet() {
         if petPanel.isVisible { petPanel.orderOut(nil); bubblePanel.orderOut(nil) }
         else { petPanel.orderFrontRegardless() }
+        layoutPocket()
     }
+    @objc private func pocketPasteMenu() { pocketPaste() }
+    @objc private func openPocketFolder() { pocket.openFolder() }
+    @objc private func emptyPocket() { pocket.clear() }
     @objc private func openDashboard() { showDashboard() }
     @objc private func planDay() { assistant.planDayFromMenu() }
     @objc private func recap() { assistant.recapFromMenu() }
@@ -518,6 +643,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let vis = NSScreen.main?.visibleFrame else { return }
         petPanel.setFrameOrigin(NSPoint(x: vis.maxX - 200, y: vis.minY + 10))
         UserDefaults.standard.set(NSStringFromPoint(petPanel.frame.origin), forKey: "petOrigin")
+        layoutPocket()
     }
 }
 
@@ -543,6 +669,13 @@ extension AppDelegate: NSMenuDelegate {
         snowItem.state = snow.isOn ? .on : .off
         menu.addItem(snowItem)
         if snow.isOn { menu.addItem(item("Shake Off the Snow", #selector(shakeSnow))) }
+        let pocketItem = NSMenuItem(title: "Pocket (\(pocket.items.count))", action: nil, keyEquivalent: "")
+        let pocketMenu = NSMenu()
+        pocketMenu.addItem(item("Put Copied Image in Pocket", #selector(pocketPasteMenu)))
+        pocketMenu.addItem(item("Open Pocket Folder", #selector(openPocketFolder)))
+        if !pocket.items.isEmpty { pocketMenu.addItem(item("Empty Pocket", #selector(emptyPocket))) }
+        pocketItem.submenu = pocketMenu
+        menu.addItem(pocketItem)
         menu.addItem(.separator())
         let checkIns = item("Daily Check-ins", #selector(toggleCheckIns))
         checkIns.state = assistant.checkInsEnabled ? .on : .off
@@ -633,6 +766,61 @@ MainActor.assumeIsolated {
            let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
             try? png.write(to: URL(fileURLWithPath: args[i + 1]))
         }
+        exit(0)
+    }
+
+    // `PiePet --render-pocket <images-dir> out.png` renders Pi with the pocket closed, open, and as a drop target,
+    // using the images in <images-dir> (they are copied to a temp pocket; nothing real is touched).
+    if let i = args.firstIndex(of: "--render-pocket"), i + 2 < args.count {
+        _ = NSApplication.shared
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("PiePocketPreview-\(UUID().uuidString)")
+        let pocket = PocketStore(dir: tmp)
+        let srcs = ((try? FileManager.default.contentsOfDirectory(at: URL(fileURLWithPath: args[i + 1]), includingPropertiesForKeys: nil)) ?? [])
+            .filter(PocketStore.isImage).sorted { $0.path < $1.path }
+        for src in srcs {
+            let pb = NSPasteboard(name: .init("PiePocketPreview"))
+            pb.clearContents()
+            pb.writeObjects([src as NSURL])
+            pocket.take(from: pb) { _ in }
+        }
+        let pet = PetState(), store = TaskStore(), notes = NotesStore()
+        let a = Assistant(pet: pet, store: store, notes: notes)
+        @MainActor func scene(expanded: Bool, target: Bool) -> some View {
+            pocket.expanded = expanded
+            pet.dropTargeted = target
+            pet.mood = target ? .excited : .idle
+            let ps = PocketView.size(for: pocket)
+            return ZStack(alignment: .bottomLeading) {
+                PocketView(pocket: pocket).offset(x: 0, y: -(172 - 127 + 2))
+                PetContainer(pet: pet, assistant: a, snow: SnowController(), onClick: {}, onDragStart: {}, onDrag: {})
+                    .offset(x: ps.width - 10 - 50)
+            }
+            .frame(width: ps.width + 150, height: max(ps.height + 47, 172), alignment: .bottomLeading)
+        }
+        var shots: [NSImage] = []
+        for (e, t) in [(false, false), (true, false), (false, true)] {
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300), styleMask: [.borderless], backing: .buffered, defer: false)
+            let host = NSHostingView(rootView: scene(expanded: e, target: t).padding(10).background(Color(red: 0.32, green: 0.42, blue: 0.55)))
+            w.contentView = host
+            w.setContentSize(host.fittingSize)
+            w.orderFrontRegardless()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.8))
+            if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+                host.cacheDisplay(in: host.bounds, to: rep)
+                let img = NSImage(size: host.bounds.size); img.addRepresentation(rep); shots.append(img)
+            }
+            w.orderOut(nil)
+        }
+        let total = NSSize(width: shots.map(\.size.width).reduce(0, +), height: shots.map(\.size.height).max() ?? 0)
+        let out = NSImage(size: total)
+        out.lockFocus()
+        var x: CGFloat = 0
+        for s in shots { s.draw(at: NSPoint(x: x, y: total.height - s.size.height), from: .zero, operation: .copy, fraction: 1); x += s.size.width }
+        out.unlockFocus()
+        if let tiff = out.tiffRepresentation, let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+            try? png.write(to: URL(fileURLWithPath: args[i + 2]))
+        }
+        try? FileManager.default.removeItem(at: tmp)
         exit(0)
     }
 

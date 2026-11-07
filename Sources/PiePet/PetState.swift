@@ -13,6 +13,8 @@ final class PetState: ObservableObject {
     @Published var lastInteraction = Date()
     /// True while the mouse is over Pi (shows the full button pill).
     @Published var hovering = false
+    /// True while an image is being dragged over Pi.
+    @Published var dropTargeted = false
 
     private var bubbleTask: Task<Void, Never>?
 
