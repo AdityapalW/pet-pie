@@ -7,6 +7,7 @@ import SwiftUI
 struct ActionPill: View {
     @ObservedObject var assistant: Assistant
     @ObservedObject var voice: VoiceController
+    @ObservedObject var snow: SnowController
     var onType: () -> Void
 
     private let ink = Color(white: 0.17)
@@ -37,6 +38,26 @@ struct ActionPill: View {
             }
             .buttonStyle(.plain)
             .help(voice.listening ? "Stop listening" : "Talk to Pi")
+
+            divider
+
+            Button { snow.toggle() } label: {
+                icon("snowflake", color: snow.isOn ? Color(red: 0.25, green: 0.55, blue: 0.85) : nil)
+                    .symbolEffect(.bounce, value: snow.isOn)
+            }
+            .buttonStyle(.plain)
+            .help(snow.isOn ? "Stop the snow (right-click for more)" : "Let it snow (right-click for more)")
+            .contextMenu {
+                Button(snow.isOn ? "Stop the snow" : "Let it snow") { snow.toggle() }
+                Picker("Snowfall", selection: $snow.intensity) {
+                    ForEach(SnowIntensity.allCases) { Text($0.label).tag($0) }
+                }
+                Toggle("Santas", isOn: $snow.santas)
+                if snow.isOn {
+                    Divider()
+                    Button("Shake the snow off my windows") { snow.shakeOff() }
+                }
+            }
 
             divider
 
@@ -130,13 +151,14 @@ final class KeyPanel: NSPanel {
 /// Pet + pill sizes (Pi is drawn in a 150x190 box and scaled to fit).
 enum PetLayout {
     static let pet = NSSize(width: 100, height: 127)
-    static let window = NSSize(width: 160, height: 172)   // wide enough for the pill with a lock-in timer
+    static let window = NSSize(width: 200, height: 172)   // wide enough for the pill with a lock-in timer
 }
 
 /// Root view of the pet window: drag to move, click for the dashboard, right-click for more.
 struct PetContainer: View {
     @ObservedObject var pet: PetState
     @ObservedObject var assistant: Assistant
+    @ObservedObject var snow: SnowController
     var onClick: () -> Void
     var onDragStart: () -> Void
     var onDrag: () -> Void
@@ -173,6 +195,7 @@ struct PetContainer: View {
                     Menu("Clipboard") {
                         ForEach(ClipAction.allCases, id: \.self) { a in Button(a.label) { assistant.clipboard(a) } }
                     }
+                    Button(snow.isOn ? "Stop the snow" : "Let it snow ❄️") { snow.toggle() }
                     Divider()
                     Button(pet.mood == .sleeping ? "Wake up" : "Nap") {
                         if pet.mood == .sleeping { pet.touch() } else { pet.hideBubble(); pet.mood = .sleeping }
@@ -181,13 +204,14 @@ struct PetContainer: View {
                 }
             ZStack(alignment: .top) {
                 if showPill {
-                    ActionPill(assistant: assistant, voice: assistant.voice, onType: onType)
+                    ActionPill(assistant: assistant, voice: assistant.voice, snow: snow, onType: onType)
                         .transition(.scale(scale: 0.4, anchor: .top).combined(with: .opacity))
                 } else {
-                    // Collapsed handle, like a tiny grabber; green while locked in.
+                    // Collapsed handle, like a tiny grabber; green while locked in, icy while snowing.
                     Capsule()
                         .fill(LinearGradient(colors: assistant.focusPhase == .focus
                                              ? [Color(red: 0.62, green: 0.82, blue: 0.45), Color(red: 0.42, green: 0.64, blue: 0.28)]
+                                             : snow.isOn ? [Color(red: 0.86, green: 0.94, blue: 1.0), Color(red: 0.55, green: 0.74, blue: 0.92)]
                                              : [Color(white: 0.88), Color(white: 0.70)],
                                              startPoint: .top, endPoint: .bottom))
                         .overlay(Capsule().strokeBorder(Color.white.opacity(0.8), lineWidth: 0.6))
@@ -208,6 +232,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let pet = PetState()
     let store = TaskStore()
     let notes = NotesStore()
+    let snow = SnowController()
     lazy var assistant = Assistant(pet: pet, store: store, notes: notes)
     var bridge: BridgeServer?
 
@@ -238,6 +263,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         assistant.start()
         startBridge()
         startHoverTracking()
+        snow.pet = pet
+        snow.restore()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -289,7 +316,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         petPanel = floatingPanel(NSRect(origin: origin, size: size))
         let view = PetContainer(
-            pet: pet, assistant: assistant,
+            pet: pet, assistant: assistant, snow: snow,
             onClick: { [weak self] in self?.petClicked() },
             onDragStart: { [weak self] in self?.dragStart() },
             onDrag: { [weak self] in self?.dragMove() },
@@ -470,6 +497,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func recap() { assistant.recapFromMenu() }
     @objc private func lockIn() { assistant.startFocus() }
     @objc private func stopFocus() { assistant.stopFocus() }
+    @objc private func toggleSnow() { snow.toggle() }
+    @objc private func shakeSnow() { snow.shakeOff() }
     @objc private func toggleCheckIns() { assistant.checkInsEnabled.toggle() }
     @objc private func setupDND() { DoNotDisturb.offerInstall() }
     @objc private func pickModel(_ sender: NSMenuItem) {
@@ -510,6 +539,10 @@ extension AppDelegate: NSMenuDelegate {
         } else {
             menu.addItem(item("Stop Lock-in", #selector(stopFocus)))
         }
+        let snowItem = item("Let It Snow ❄️", #selector(toggleSnow))
+        snowItem.state = snow.isOn ? .on : .off
+        menu.addItem(snowItem)
+        if snow.isOn { menu.addItem(item("Shake Off the Snow", #selector(shakeSnow))) }
         menu.addItem(.separator())
         let checkIns = item("Daily Check-ins", #selector(toggleCheckIns))
         checkIns.state = assistant.checkInsEnabled ? .on : .off
@@ -586,6 +619,23 @@ MainActor.assumeIsolated {
         exit(0)
     }
 
+    // `PiePet --render-snow out.png` renders the Santa poses and a snowball.
+    if let i = args.firstIndex(of: "--render-snow"), i + 1 < args.count {
+        let strip = HStack(spacing: 14) {
+            ForEach(SantaPose.allCases, id: \.self) { pose in
+                if let cg = SnowArt.santaImage(pose) { Image(decorative: cg, scale: 3).resizable().frame(width: 162, height: 162) }
+            }
+        }
+        .padding(16).background(Color(red: 0.55, green: 0.66, blue: 0.80))
+        let r = ImageRenderer(content: strip)
+        r.scale = 2
+        if let img = r.nsImage, let tiff = img.tiffRepresentation,
+           let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) {
+            try? png.write(to: URL(fileURLWithPath: args[i + 1]))
+        }
+        exit(0)
+    }
+
     // `PiePet --render-dashboard out.png` renders the dashboard + pet with sample chats (nothing is saved).
     if let i = args.firstIndex(of: "--render-dashboard"), i + 1 < args.count {
         _ = NSApplication.shared
@@ -612,10 +662,10 @@ MainActor.assumeIsolated {
         }
         snap(DashboardView(assistant: a, chats: a.chats, store: store, notes: notes, projects: a.projects, voice: a.voice),
              NSSize(width: 1000, height: 700), args[i + 1])
-        snap(PetContainer(pet: pet, assistant: a, onClick: {}, onDragStart: {}, onDrag: {}).background(Color(white: 0.2)),
+        snap(PetContainer(pet: pet, assistant: a, snow: SnowController(), onClick: {}, onDragStart: {}, onDrag: {}).background(Color(white: 0.2)),
              PetLayout.window, args[i + 1].replacingOccurrences(of: ".png", with: "-pet.png"))
         pet.hovering = true
-        snap(PetContainer(pet: pet, assistant: a, onClick: {}, onDragStart: {}, onDrag: {}).background(Color(white: 0.2)),
+        snap(PetContainer(pet: pet, assistant: a, snow: SnowController(), onClick: {}, onDragStart: {}, onDrag: {}).background(Color(white: 0.2)),
              PetLayout.window, args[i + 1].replacingOccurrences(of: ".png", with: "-pet-hover.png"))
         snap(QuickAskView(onSubmit: { _ in }, onCancel: {}).background(Color(white: 0.2)),
              NSSize(width: 272, height: 44), args[i + 1].replacingOccurrences(of: ".png", with: "-ask.png"))
