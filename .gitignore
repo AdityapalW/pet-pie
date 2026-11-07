@@ -1,0 +1,5 @@
+.build/
+build/
+*.vsix
+.DS_Store
+.swiftpm/

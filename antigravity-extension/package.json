@@ -1,0 +1,24 @@
+{
+  "name": "pi-companion",
+  "displayName": "Pi Companion",
+  "description": "Connects Antigravity to Pi, your desktop pet: when you close a project, Pi saves where you left off.",
+  "version": "0.2.0",
+  "publisher": "local-hackathon",
+  "license": "MIT",
+  "engines": { "vscode": "^1.80.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "piCompanion.openContext", "title": "Pi: Open Where I Left Off" },
+      { "command": "piCompanion.saveNote", "title": "Pi: Save Selection as Note" }
+    ],
+    "configuration": {
+      "title": "Pi Companion",
+      "properties": {
+        "piCompanion.port": { "type": "number", "default": 47615, "description": "Port of the Pi desktop app's local bridge." }
+      }
+    }
+  }
+}
